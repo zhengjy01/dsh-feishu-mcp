@@ -23,7 +23,10 @@ A web settings panel (Settings → 飞书) configures the App ID / App Secret, s
 ## Install
 
 ```sh
-# local development (link)
+# from npm (published package)
+dsh plugin --profile web add dsh-feishu-mcp
+
+# or local development
 dsh plugin --profile web add link:/path/to/dsh-feishu-mcp
 # restart dsh web to activate
 ```

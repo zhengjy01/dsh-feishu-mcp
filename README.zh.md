@@ -27,6 +27,10 @@ Web 设置面板（设置 → 飞书）配置 App ID / App Secret、显示连接
 
 ```sh
 # 本地开发（link）
+# from npm (published package)
+dsh plugin --profile web add dsh-feishu-mcp
+
+# or local development
 dsh plugin --profile web add link:/path/to/dsh-feishu-mcp
 # 重启 dsh web 生效
 ```
