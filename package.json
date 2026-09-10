@@ -1,6 +1,6 @@
 {
   "name": "dsh-feishu-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Feishu (Lark) OpenAPI MCP connection for DeepSeek Harness: drives the official @larksuiteoapi/lark-mcp stdio server with your Feishu app credentials, exposes Feishu API tools (IM messages, Bitable, docs, calendar, drive) under mcp__feishu__*, and a web settings panel",
   "type": "module",
   "main": "lib/index.js",
@@ -20,6 +20,9 @@
         "@deepseek-ai/dsh-client-ui-settings"
       ],
       "platform": "web"
+    },
+    "engines": {
+      "dsh": ">=0.1.5-rc.1"
     }
   },
   "files": [

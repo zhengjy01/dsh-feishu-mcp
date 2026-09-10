@@ -15,6 +15,10 @@ Web 设置面板（设置 → 飞书）配置 App ID / App Secret、显示连接
 - **agent 工具**：`feishu_status` / `feishu_config` / `feishu_test` / `feishu_tools` / `feishu_oauth_start` / `feishu_oauth_finish` / `feishu_oauth_refresh`。
 - **Web 设置面板**：配置凭据、登录授权、刷新令牌、测试连接、查看实时工具列表。
 
+## 兼容性
+
+要求 **DeepSeek Harness ≥ 0.1.5-rc.1**（已在包清单的 `dsh.engines.dsh` 中声明，DSH 插件市场据此显示兼容版本），并已在 **0.1.5-rc.1** 上实测通过。本构建包含 DSH 0.1.5 的适配：工具结果的严格校验契约（lossless-JSON 快照、`additionalProperties: false` 的 schema 校验、`output.render` 必须返回 `ContentBlock[]`），以及不依赖宿主 PATH 的可执行文件解析（launchd 托管的宿主 `PATH` 只有 `/usr/bin:/bin`）。
+
 ## 前置条件
 
 1. 一个飞书自建应用：[飞书开放平台](https://open.feishu.cn/) → 开发者后台 → 创建应用。
