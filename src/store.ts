@@ -32,10 +32,18 @@ export interface FeishuCredentials {
   appSecret: string
   userAccessToken: string
   userRefreshToken: string
-  /** ISO timestamp of the last successful connect / token update. */
-  tokenUpdatedAt: string
+  /** Epoch ms when the user_access_token expires (0 = unknown / manual paste). */
+  userTokenExpiresAt: number
+  /** Epoch ms when the refresh_token expires (0 = unknown). */
+  userRefreshExpiresAt: number
+  /** Granted OAuth scopes (space-separated), e.g. 'offline_access im:message'. */
+  scope: string
+  /** Feishu API domain (default https://open.feishu.cn; intl https://open.larksuite.com). */
+  domain: string
   /** Extra CLI args passed to lark-mcp (e.g. -t presets). */
   extraArgs: string[]
+  /** ISO timestamp of the last successful connect / token update. */
+  tokenUpdatedAt: string
 }
 
 /** Public, secret-free status view. */
@@ -44,6 +52,14 @@ export interface FeishuConfigView {
   appIdMasked: string
   hasAppSecret: boolean
   hasUserToken: boolean
+  /** Epoch ms when the user_access_token expires (0 = unknown). */
+  userTokenExpiresAt: number
+  /** Epoch ms when the refresh_token expires (0 = unknown). */
+  userRefreshExpiresAt: number
+  /** Granted OAuth scopes (space-separated). */
+  scope: string
+  /** Feishu API domain (default https://open.feishu.cn). */
+  domain: string
   tokenUpdatedAt: string
   configPath: string
 }
@@ -62,6 +78,10 @@ function empty(): FeishuCredentials {
     appSecret: '',
     userAccessToken: '',
     userRefreshToken: '',
+    userTokenExpiresAt: 0,
+    userRefreshExpiresAt: 0,
+    scope: '',
+    domain: '',
     tokenUpdatedAt: '',
     extraArgs: [],
   }
@@ -71,11 +91,16 @@ function empty(): FeishuCredentials {
 function parse(raw: unknown): FeishuCredentials {
   const record = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
   const str = (value: unknown): string => (typeof value === 'string' ? value : '')
+  const num = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
   return {
     appId: str(record.appId),
     appSecret: str(record.appSecret),
     userAccessToken: str(record.userAccessToken),
     userRefreshToken: str(record.userRefreshToken),
+    userTokenExpiresAt: num(record.userTokenExpiresAt),
+    userRefreshExpiresAt: num(record.userRefreshExpiresAt),
+    scope: str(record.scope),
+    domain: str(record.domain),
     tokenUpdatedAt: str(record.tokenUpdatedAt),
     extraArgs: Array.isArray(record.extraArgs)
       ? record.extraArgs.filter((a): a is string => typeof a === 'string')
@@ -117,6 +142,10 @@ export class FeishuStore {
       appIdMasked: mask(cfg.appId),
       hasAppSecret: cfg.appSecret.trim() !== '',
       hasUserToken: cfg.userAccessToken.trim() !== '',
+      userTokenExpiresAt: cfg.userTokenExpiresAt,
+      userRefreshExpiresAt: cfg.userRefreshExpiresAt,
+      scope: cfg.scope,
+      domain: cfg.domain || '',
       tokenUpdatedAt: cfg.tokenUpdatedAt,
       configPath: configPath(),
     }
@@ -128,13 +157,34 @@ export class FeishuStore {
     const next: FeishuCredentials = { ...cfg }
     if (args !== undefined && typeof args.appId === 'string') next.appId = args.appId.trim()
     if (args !== undefined && typeof args.appSecret === 'string') next.appSecret = args.appSecret.trim()
-    if (args !== undefined && typeof args.userAccessToken === 'string') next.userAccessToken = args.userAccessToken.trim()
+    if (args !== undefined && typeof args.userAccessToken === 'string') {
+      next.userAccessToken = args.userAccessToken.trim()
+      // Manually pasted tokens carry no expiry; clear it so we never refresh blindly.
+      if (args.userAccessToken.trim() !== '') next.userTokenExpiresAt = 0
+    }
     if (args !== undefined && typeof args.userRefreshToken === 'string') next.userRefreshToken = args.userRefreshToken.trim()
+    if (args !== undefined && typeof args.scope === 'string') next.scope = args.scope.trim()
+    if (args !== undefined && typeof args.domain === 'string') next.domain = args.domain.trim()
     if (args !== undefined && Array.isArray(args.extraArgs)) {
       next.extraArgs = args.extraArgs.filter((a): a is string => typeof a === 'string')
     }
     await this.save(next)
     return this.view()
+  }
+
+  /** Persist tokens returned by the OAuth flow (user_access_token + refresh). */
+  async saveUserTokens(token: { access_token: string; refresh_token: string; expires_in: number; refresh_token_expires_in: number; token_type: string; scope: string }): Promise<void> {
+    const cfg = await this.load()
+    const now = Date.now()
+    await this.save({
+      ...cfg,
+      userAccessToken: token.access_token,
+      userRefreshToken: token.refresh_token,
+      userTokenExpiresAt: token.expires_in > 0 ? now + token.expires_in * 1000 : 0,
+      userRefreshExpiresAt: token.refresh_token_expires_in > 0 ? now + token.refresh_token_expires_in * 1000 : 0,
+      scope: token.scope || cfg.scope,
+      tokenUpdatedAt: new Date().toISOString(),
+    })
   }
 
   /** Record a successful connection time. */

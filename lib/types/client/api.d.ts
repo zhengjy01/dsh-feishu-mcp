@@ -8,10 +8,27 @@ export interface FeishuConfigView {
     appIdMasked: string;
     hasAppSecret: boolean;
     hasUserToken: boolean;
+    userTokenExpiresAt: number;
+    userRefreshExpiresAt: number;
+    scope: string;
+    domain: string;
     tokenUpdatedAt: string;
     configPath: string;
     connected: boolean;
     toolCount: number;
+}
+/** OAuth start result. */
+export interface FeishuOAuthStartResult {
+    ok: boolean;
+    authorizeUrl?: string;
+    state?: string;
+    callbackUrl?: string;
+    error?: string;
+}
+/** OAuth finish / refresh result. */
+export interface FeishuOAuthActionResult {
+    ok: boolean;
+    message: string;
 }
 /** Test result. */
 export interface FeishuTestResult {
@@ -31,4 +48,7 @@ export declare class FeishuApi {
     setConfig(patch: Record<string, unknown>): Promise<FeishuConfigView>;
     reset(): Promise<FeishuConfigView>;
     test(): Promise<FeishuTestResult>;
+    oauthStart(): Promise<FeishuOAuthStartResult>;
+    oauthFinish(code: string, state?: string): Promise<FeishuOAuthActionResult>;
+    oauthRefresh(): Promise<FeishuOAuthActionResult>;
 }

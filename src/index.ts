@@ -22,6 +22,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { FeishuStore } from './store.ts'
 import { createSupervisor, type McpSupervisor } from './mcp.ts'
 import { makeRoutes, FEISHU_API } from './routes.ts'
+import { FeishuOAuthFlow } from './oauth.ts'
 
 /** Stable cordis plugin name. */
 export const name = 'feishu-mcp'
@@ -35,8 +36,9 @@ const SECTION_ORDER = 210
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
 export const FEISHU_GUIDANCE =
   '本机已安装 dsh-feishu 插件（飞书 OpenAPI MCP 连接）：驱动官方 @larksuiteoapi/lark-mcp 服务器，把飞书开放平台 API 封装为 mcp__feishu__* 工具（IM 消息、多维表格 Bitable、云文档、日历、云盘等，具体以连接后发现的工具为准）。' +
-  '工具：feishu_status（状态）、feishu_config（配置 App ID / App Secret / 用户令牌）、feishu_test（测试连接并列出工具）、feishu_tools（列出工具）。' +
-  '前提：需先在飞书开放平台创建企业自建应用并添加所需权限（im/bitable/docx/calendar/drive 等），把 App ID / App Secret 配置进插件；如需以用户身份访问私有资源，可另行登录用户令牌。' +
+  '工具：feishu_status（状态）、feishu_config（配置 App ID / App Secret / 用户令牌）、feishu_test（测试连接并列出工具）、feishu_tools（列出工具）、feishu_oauth_start（发起浏览器跳转授权）、feishu_oauth_finish（用回调 code 完成授权）、feishu_oauth_refresh（刷新用户令牌）。' +
+  '前提：需先在飞书开放平台创建企业自建应用并添加所需权限（im/bitable/docx/calendar/drive 等），把 App ID / App Secret 配置进插件，并把重定向 URL 设为 ' + FEISHU_API.oauthCallback + '（在应用「安全设置→重定向 URL」配置）。' +
+  '如需以用户身份访问私有资源：先 feishu_oauth_start 拿到授权链接，指导用户在浏览器登录飞书并授权（scope 需含需要的 API 权限 + offline_access），授权后自动回填 user_access_token；也可用 feishu_oauth_refresh 刷新。' +
   '用户提到「飞书 / Feishu / Lark / 多维表格 / 发飞书消息」时即指本插件，请据此协作。'
 
 /** Plugin config, read from the composition row. */
@@ -56,6 +58,10 @@ function text(value: string): ContentBlock[] {
 export interface ToolContext {
   store: FeishuStore
   supervisor: McpSupervisor
+  /** OAuth flow (authorize/complete/refresh). */
+  oauth: FeishuOAuthFlow
+  /** The loopback OAuth callback URL. */
+  callbackUrl: string
 }
 
 /** Status tool: config + connection state. */
@@ -75,7 +81,12 @@ export function feishuStatusTool(ctx: ToolContext) {
           connected: { type: 'boolean' },
           toolCount: { type: 'number' },
           appIdMasked: { type: 'string' },
+          hasAppSecret: { type: 'boolean' },
           hasUserToken: { type: 'boolean' },
+          userTokenExpiresAt: { type: 'number' },
+          userRefreshExpiresAt: { type: 'number' },
+          scope: { type: 'string' },
+          domain: { type: 'string' },
           tokenUpdatedAt: { type: 'string' },
           configPath: { type: 'string' },
         },
@@ -89,8 +100,12 @@ export function feishuStatusTool(ctx: ToolContext) {
           '飞书配置：' + (view.configured ? '已配置（App ID ' + view.appIdMasked + '）' : '未配置（请用 feishu_config 设置 App ID / App Secret）'),
           'MCP 连接：' + (ctx.supervisor.isConnected() ? '已连接' : '未连接'),
           '已注册工具：' + ctx.supervisor.toolCount() + ' 个（mcp__feishu__*）',
-          '用户令牌：' + (view.hasUserToken ? '已配置' : '未配置（tenant 身份）'),
+          '用户令牌：' + (view.hasUserToken ? '已配置' : '未配置（tenant 身份，如需访问私有资源请在浏览器登录授权）'),
         ]
+        if (view.hasUserToken && view.userTokenExpiresAt > 0) {
+          const minutes = Math.max(0, Math.floor((view.userTokenExpiresAt - Date.now()) / 60_000))
+          parts.push('令牌剩余：约 ' + minutes + ' 分钟（可用 feishu_oauth_refresh 刷新）')
+        }
         if (view.tokenUpdatedAt) parts.push('最近连接：' + view.tokenUpdatedAt)
         return { ok: true, message: parts.join('\n'), ...view, connected: ctx.supervisor.isConnected(), toolCount: ctx.supervisor.toolCount() }
       } catch (error) {
@@ -104,12 +119,14 @@ export function feishuStatusTool(ctx: ToolContext) {
 export function feishuConfigTool(ctx: ToolContext) {
   return defineTool({
     name: 'feishu_config',
-    description: '配置 dsh-feishu 飞书凭据：appId/appSecret（飞书开放平台企业自建应用的 App ID / App Secret）、userAccessToken/userRefreshToken（可选，用户身份令牌）、extraArgs（可选，传给 lark-mcp 的额外 CLI 参数，如 -t 工具预设）。配置持久化到 ~/.dsh/dsh-feishu.json（0600）。传 reset: true 清除全部凭据。',
+    description: '配置 dsh-feishu 飞书凭据：appId/appSecret（飞书开放平台企业自建应用的 App ID / App Secret）、userAccessToken/userRefreshToken（可选，用户身份令牌）、scope（可选，登录授权请求的权限列表，需含 offline_access 才能拿到 refresh_token）、domain（可选，飞书 API 域名，默认 https://open.feishu.cn，Lark 国际版用 https://open.larksuite.com）、extraArgs（可选，传给 lark-mcp 的额外 CLI 参数，如 -t 工具预设）。配置持久化到 ~/.dsh/dsh-feishu.json（0600）。传 reset: true 清除全部凭据。',
     parameters: {
       appId: { type: 'string', description: '飞书 App ID（开放平台创建应用获取）' },
       appSecret: { type: 'string', description: '飞书 App Secret' },
       userAccessToken: { type: 'string', description: '可选：用户访问令牌（user_access_token，访问私有资源时用）' },
       userRefreshToken: { type: 'string', description: '可选：用户刷新令牌' },
+      scope: { type: 'string', description: '可选：登录授权请求的 scope（空格分隔，建议含 offline_access + 需要的 API 权限）' },
+      domain: { type: 'string', description: '可选：飞书 API 域名（默认 https://open.feishu.cn）' },
       extraArgs: { type: 'array', items: { type: 'string' }, description: '可选：额外 CLI 参数（如 -t preset）' },
       reset: { type: 'boolean', description: '清除全部凭据' },
     },
@@ -215,9 +232,119 @@ export function feishuToolsTool(ctx: ToolContext) {
   })
 }
 
+/** OAuth start tool: build the Feishu authorize URL for the browser. */
+export function feishuOauthStartTool(ctx: ToolContext) {
+  return defineTool({
+    name: 'feishu_oauth_start',
+    description: '发起飞书浏览器跳转授权：构造飞书授权页面链接（authen/v1/authorize），让用户在浏览器登录飞书并同意授权，授权完成后自动回调本机并把 user_access_token 存进插件。返回 authorizeUrl（让用户用浏览器打开）与回调地址。',
+    parameters: {
+      scope: { type: 'string', description: '可选：覆盖授权 scope（空格分隔；默认用配置的 scope，缺省为 offline_access）。需含离线访问权限 offline_access 才能拿到 refresh_token。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          message: { type: 'string', required: true },
+          authorizeUrl: { type: 'string' },
+          state: { type: 'string' },
+          callbackUrl: { type: 'string' },
+        },
+      },
+      render: (_args: unknown, value: Record<string, unknown>) => text(String(value.message ?? '')),
+    },
+    async execute(args: Record<string, unknown>) {
+      try {
+        const scope = typeof args?.scope === 'string' ? args.scope : undefined
+        const { authorizeUrl, state } = await ctx.oauth.begin(ctx.callbackUrl, scope)
+        return {
+          ok: true,
+          message: '已在飞书发起跳转授权，请让用户在浏览器打开以下链接完成登录授权（授权后自动回调 ' + ctx.callbackUrl + ' 并保存 user_access_token）：\n\n' + authorizeUrl,
+          authorizeUrl,
+          state,
+          callbackUrl: ctx.callbackUrl,
+        }
+      } catch (error) {
+        return { ok: false, message: '发起授权失败: ' + String(error instanceof Error ? error.message : error) }
+      }
+    },
+  })
+}
+
+/** OAuth finish tool: exchange a callback code (manual paste path). */
+export function feishuOauthFinishTool(ctx: ToolContext) {
+  return defineTool({
+    name: 'feishu_oauth_finish',
+    description: '用飞书回调地址里的 code 完成授权：当浏览器未自动回调（或用户把回调 URL 里的 code 粘贴回来）时，把 code（可带 state）交给本工具换取 user_access_token。',
+    parameters: {
+      code: { type: 'string', description: '授权回调地址里的 code 参数' },
+      state: { type: 'string', description: '可选：回调地址里的 state 参数（校验用）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          message: { type: 'string', required: true },
+        },
+      },
+      render: (_args: unknown, value: Record<string, unknown>) => text(String(value.message ?? '')),
+    },
+    async execute(args: Record<string, unknown>) {
+      try {
+        const code = typeof args?.code === 'string' ? args.code.trim() : ''
+        const state = typeof args?.state === 'string' ? args.state.trim() : ''
+        if (code === '') return { ok: false, message: '缺少 code：请把飞书回调 URL 里的 code 参数传给我。' }
+        const result = await ctx.oauth.complete(code, state)
+        return { ok: result.ok, message: result.message }
+      } catch (error) {
+        return { ok: false, message: '完成授权失败: ' + String(error instanceof Error ? error.message : error) }
+      }
+    },
+  })
+}
+
+/** OAuth refresh tool: refresh the user_access_token. */
+export function feishuOauthRefreshTool(ctx: ToolContext) {
+  return defineTool({
+    name: 'feishu_oauth_refresh',
+    description: '刷新 dsh-feishu 的 user_access_token：用已保存的 refresh_token 换一个新的用户令牌（需要授权时 scope 含 offline_access）。令牌过期或临近过期时调用。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          message: { type: 'string', required: true },
+        },
+      },
+      render: (_args: unknown, value: Record<string, unknown>) => text(String(value.message ?? '')),
+    },
+    async execute() {
+      try {
+        const result = await ctx.oauth.refreshToken()
+        return { ok: result.ok, message: result.message }
+      } catch (error) {
+        return { ok: false, message: '刷新失败: ' + String(error instanceof Error ? error.message : error) }
+      }
+    },
+  })
+}
+
 /** Build the tool list for registration. */
 export function buildTools(ctx: ToolContext) {
-  return [feishuStatusTool(ctx), feishuConfigTool(ctx), feishuTestTool(ctx), feishuToolsTool(ctx)]
+  return [
+    feishuStatusTool(ctx),
+    feishuConfigTool(ctx),
+    feishuTestTool(ctx),
+    feishuToolsTool(ctx),
+    feishuOauthStartTool(ctx),
+    feishuOauthFinishTool(ctx),
+    feishuOauthRefreshTool(ctx),
+  ]
 }
 
 /**
@@ -229,8 +356,10 @@ export function apply(ctx: Context, config?: Config): void {
   const announceToAgent = config?.announceToAgent !== false
   const enabled = config?.enabled !== false
   const store = new FeishuStore()
-  const supervisor = createSupervisor(ctx, store)
-  const context: ToolContext = { store, supervisor }
+  const oauth = new FeishuOAuthFlow(store)
+  const callbackUrl = `http://127.0.0.1:${ctx.webServer.port}${FEISHU_API.oauthCallback}`
+  const supervisor = createSupervisor(ctx, store, oauth)
+  const context: ToolContext = { store, supervisor, oauth, callbackUrl }
 
   let disposeTools: (() => void) | undefined
   let disposeRoutes: (() => void) | undefined
@@ -284,4 +413,5 @@ export function apply(ctx: Context, config?: Config): void {
 export { FeishuStore, configPath, DEFAULT_CONFIG_FILE, mask, type FeishuCredentials, type FeishuConfigView } from './store.ts'
 export { createSupervisor, buildServerParams, publicToolName, type McpSupervisor } from './mcp.ts'
 export { makeRoutes, FEISHU_API } from './routes.ts'
+export { FeishuOAuthFlow, DEFAULT_DOMAIN, LARK_DOMAIN, type FeishuTokenResult } from './oauth.ts'
 export { defineTool }

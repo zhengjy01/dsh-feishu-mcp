@@ -9,10 +9,29 @@ export interface FeishuConfigView {
   appIdMasked: string
   hasAppSecret: boolean
   hasUserToken: boolean
+  userTokenExpiresAt: number
+  userRefreshExpiresAt: number
+  scope: string
+  domain: string
   tokenUpdatedAt: string
   configPath: string
   connected: boolean
   toolCount: number
+}
+
+/** OAuth start result. */
+export interface FeishuOAuthStartResult {
+  ok: boolean
+  authorizeUrl?: string
+  state?: string
+  callbackUrl?: string
+  error?: string
+}
+
+/** OAuth finish / refresh result. */
+export interface FeishuOAuthActionResult {
+  ok: boolean
+  message: string
 }
 
 /** Test result. */
@@ -84,6 +103,30 @@ export class FeishuApi {
 
   async test(): Promise<FeishuTestResult> {
     return request<FeishuTestResult>('/api/dsh-feishu/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+  }
+
+  async oauthStart(): Promise<FeishuOAuthStartResult> {
+    return request<FeishuOAuthStartResult>('/api/dsh-feishu/oauth/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+  }
+
+  async oauthFinish(code: string, state?: string): Promise<FeishuOAuthActionResult> {
+    return request<FeishuOAuthActionResult>('/api/dsh-feishu/oauth/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, ...(state !== undefined && state !== '' ? { state } : {}) }),
+    })
+  }
+
+  async oauthRefresh(): Promise<FeishuOAuthActionResult> {
+    return request<FeishuOAuthActionResult>('/api/dsh-feishu/oauth/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),

@@ -22,10 +22,18 @@ export interface FeishuCredentials {
     appSecret: string;
     userAccessToken: string;
     userRefreshToken: string;
-    /** ISO timestamp of the last successful connect / token update. */
-    tokenUpdatedAt: string;
+    /** Epoch ms when the user_access_token expires (0 = unknown / manual paste). */
+    userTokenExpiresAt: number;
+    /** Epoch ms when the refresh_token expires (0 = unknown). */
+    userRefreshExpiresAt: number;
+    /** Granted OAuth scopes (space-separated), e.g. 'offline_access im:message'. */
+    scope: string;
+    /** Feishu API domain (default https://open.feishu.cn; intl https://open.larksuite.com). */
+    domain: string;
     /** Extra CLI args passed to lark-mcp (e.g. -t presets). */
     extraArgs: string[];
+    /** ISO timestamp of the last successful connect / token update. */
+    tokenUpdatedAt: string;
 }
 /** Public, secret-free status view. */
 export interface FeishuConfigView {
@@ -33,6 +41,14 @@ export interface FeishuConfigView {
     appIdMasked: string;
     hasAppSecret: boolean;
     hasUserToken: boolean;
+    /** Epoch ms when the user_access_token expires (0 = unknown). */
+    userTokenExpiresAt: number;
+    /** Epoch ms when the refresh_token expires (0 = unknown). */
+    userRefreshExpiresAt: number;
+    /** Granted OAuth scopes (space-separated). */
+    scope: string;
+    /** Feishu API domain (default https://open.feishu.cn). */
+    domain: string;
     tokenUpdatedAt: string;
     configPath: string;
 }
@@ -51,6 +67,15 @@ export declare class FeishuStore {
     view(): Promise<FeishuConfigView>;
     /** Apply a credentials patch: strings replace, undefined keeps. */
     patch(args: Record<string, unknown> | undefined): Promise<FeishuConfigView>;
+    /** Persist tokens returned by the OAuth flow (user_access_token + refresh). */
+    saveUserTokens(token: {
+        access_token: string;
+        refresh_token: string;
+        expires_in: number;
+        refresh_token_expires_in: number;
+        token_type: string;
+        scope: string;
+    }): Promise<void>;
     /** Record a successful connection time. */
     recordConnected(): Promise<void>;
     /** Clear every credential. */

@@ -17,6 +17,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { FeishuStore } from './store.ts';
 import { type McpSupervisor } from './mcp.ts';
+import { FeishuOAuthFlow } from './oauth.ts';
 /** Stable cordis plugin name. */
 export declare const name = "feishu-mcp";
 /** Services required before the plugin surfaces can mount. */
@@ -34,6 +35,10 @@ export interface Config {
 export interface ToolContext {
     store: FeishuStore;
     supervisor: McpSupervisor;
+    /** OAuth flow (authorize/complete/refresh). */
+    oauth: FeishuOAuthFlow;
+    /** The loopback OAuth callback URL. */
+    callbackUrl: string;
 }
 /** Status tool: config + connection state. */
 export declare function feishuStatusTool(ctx: ToolContext): import("@deepseek-ai/dsh-tools").ToolDefinition;
@@ -43,6 +48,12 @@ export declare function feishuConfigTool(ctx: ToolContext): import("@deepseek-ai
 export declare function feishuTestTool(ctx: ToolContext): import("@deepseek-ai/dsh-tools").ToolDefinition;
 /** Tools tool: list the MCP server's tools. */
 export declare function feishuToolsTool(ctx: ToolContext): import("@deepseek-ai/dsh-tools").ToolDefinition;
+/** OAuth start tool: build the Feishu authorize URL for the browser. */
+export declare function feishuOauthStartTool(ctx: ToolContext): import("@deepseek-ai/dsh-tools").ToolDefinition;
+/** OAuth finish tool: exchange a callback code (manual paste path). */
+export declare function feishuOauthFinishTool(ctx: ToolContext): import("@deepseek-ai/dsh-tools").ToolDefinition;
+/** OAuth refresh tool: refresh the user_access_token. */
+export declare function feishuOauthRefreshTool(ctx: ToolContext): import("@deepseek-ai/dsh-tools").ToolDefinition;
 /** Build the tool list for registration. */
 export declare function buildTools(ctx: ToolContext): import("@deepseek-ai/dsh-tools").ToolDefinition[];
 /**
@@ -55,4 +66,5 @@ export declare function apply(ctx: Context, config?: Config): void;
 export { FeishuStore, configPath, DEFAULT_CONFIG_FILE, mask, type FeishuCredentials, type FeishuConfigView } from './store.ts';
 export { createSupervisor, buildServerParams, publicToolName, type McpSupervisor } from './mcp.ts';
 export { makeRoutes, FEISHU_API } from './routes.ts';
+export { FeishuOAuthFlow, DEFAULT_DOMAIN, LARK_DOMAIN, type FeishuTokenResult } from './oauth.ts';
 export { defineTool };

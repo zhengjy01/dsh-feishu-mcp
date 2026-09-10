@@ -20,6 +20,8 @@ import { ListToolsResultSchema, ToolListChangedNotificationSchema } from '@model
 import { StdioClientTransport, type StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { FeishuStore } from './store.ts'
+import { extendedPath } from './child-env.ts'
+import type { FeishuOAuthFlow } from './oauth.ts'
 
 /** Raw call result record: the bridge owns JSON-value validation after transport. */
 const RawCallToolResultSchema = z.record(z.string(), z.unknown())
@@ -99,6 +101,8 @@ function extractText(mcpContent: unknown, toolName: string): string {
 export interface McpSupervisor {
   /** Start (or restart) the supervised connection. Only connects when credentials exist. */
   start(): Promise<void>
+  /** Quit the current generation (if any) and reconnect cleanly (e.g. after an OAuth token change). */
+  restart(): Promise<void>
   /** Whether a client generation is currently connected. */
   isConnected(): boolean
   /** Number of tools currently registered from this server. */
@@ -111,28 +115,44 @@ export interface McpSupervisor {
 
 /**
  * Build the stdio server parameters for the official lark-mcp.
- * @param cfg - credentials (appId/appSecret + optional user token + extra args).
+ * The user_access_token is handed to the child through the `USER_ACCESS_TOKEN`
+ * env var (the official CLI reads it near startup and, when present, forces
+ * user-identity calls) — never on the command line (secrets must not leak to
+ * `ps`). `LARK_TOKEN_MODE` mirrors `--token-mode` for clarity.
+ * @param cfg - credentials (appId/appSecret + optional user token/domain + extra args).
  */
-export function buildServerParams(cfg: { appId: string; appSecret: string; userAccessToken: string; extraArgs: string[] }): StdioServerParameters {
+export function buildServerParams(cfg: { appId: string; appSecret: string; userAccessToken: string; domain?: string; extraArgs: string[] }): StdioServerParameters {
   const args = ['-y', LARK_MCP_PACKAGE, 'mcp', '-a', cfg.appId, '-s', cfg.appSecret]
+  if (cfg.domain !== undefined && cfg.domain.trim() !== '') {
+    args.push('--domain', cfg.domain.trim())
+  }
   if (cfg.userAccessToken.trim() !== '') {
     // Prefer user identity when a user token exists; the official CLI reads
-    // it from its own credential file, so we pass the flag to force it.
+    // it from the USER_ACCESS_TOKEN env var (set below).
     args.push('--token-mode', 'user_access_token')
   }
   for (const extra of cfg.extraArgs) args.push(extra)
-  return { command: LARK_MCP_COMMAND, args, env: process.env as Record<string, string> }
+  const env = { ...process.env } as Record<string, string>
+  // A launchd-started DSH has only /usr/bin:/bin, which hides npx.
+  env.PATH = extendedPath()
+  if (cfg.userAccessToken.trim() !== '') {
+    env.USER_ACCESS_TOKEN = cfg.userAccessToken.trim()
+    env.LARK_TOKEN_MODE = 'user_access_token'
+  }
+  return { command: LARK_MCP_COMMAND, args, env }
 }
 
 /**
  * Create the supervised stdio connection to the Feishu MCP server.
  * @param ctx - cordis context carrying the tools registry and logger.
  * @param store - credential store (app credentials gate the connection).
+ * @param oauth - OAuth flow (refreshes the user_access_token before spawn).
  * @returns the supervisor handle.
  */
 export function createSupervisor(
   ctx: Context,
   store: FeishuStore,
+  oauth: FeishuOAuthFlow,
 ): McpSupervisor {
   const label = 'feishu-mcp'
   let client: Client | null = null
@@ -140,6 +160,7 @@ export function createSupervisor(
   let transport: StdioClientTransport | null = null
   let disposers = new Map<string, () => void>()
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = null
   let failedAttempts = 0
   let connectedAt: number | null = null
   let disposed = false
@@ -147,6 +168,36 @@ export function createSupervisor(
   let syncChain: Promise<unknown> = Promise.resolve()
 
   const isCurrent = (generation: Client): boolean => !disposed && client === generation
+
+  /** Check token expiry periodically; refresh + reconnect the child when close. */
+  function scheduleWatchdog(): void {
+    if (disposed) return
+    if (watchdogTimer !== null) clearTimeout(watchdogTimer)
+    watchdogTimer = setTimeout(() => {
+      watchdogTimer = null
+      if (disposed) return
+      void (async () => {
+        try {
+          const cfg = await store.load()
+          // Only watch when a user token exists and is nearing expiry.
+          if (cfg.userAccessToken.trim() === '' || cfg.userTokenExpiresAt <= 0) return
+          const nearExpiry = cfg.userTokenExpiresAt - Date.now() <= 5 * 60_000
+          if (nearExpiry && cfg.userRefreshToken.trim() !== '') {
+            const refreshed = await oauth.ensureFresh().catch(() => false)
+            if (refreshed) {
+              ctx.logger.info(`${label}: user_access_token refreshed; reconnecting lark-mcp child`)
+              void restart()
+              return
+            }
+          }
+          scheduleWatchdog()
+        } catch {
+          scheduleWatchdog()
+        }
+      })()
+    }, 60_000)
+    watchdogTimer.unref()
+  }
 
   function enqueueSync(generation: Client): Promise<void> {
     const run = syncChain.then(async () => {
@@ -269,10 +320,16 @@ export function createSupervisor(
 
   async function connectGeneration(startup: boolean): Promise<void> {
     if (disposed) return
-    const cfg = await store.load()
+    let cfg = await store.load()
     if (cfg.appId.trim() === '' || cfg.appSecret.trim() === '') {
       ctx.logger.info(`${label}: no Feishu app credentials — connection deferred until configured`)
       return
+    }
+    // Refresh the user token if near expiry before spawning the child, so the
+    // USER_ACCESS_TOKEN env var handed to lark-mcp is current.
+    if (cfg.userAccessToken.trim() !== '') {
+      const refreshed = await oauth.ensureFresh().catch(() => false)
+      if (refreshed) cfg = await store.load()
     }
     const generation = new Client({ name: 'dsh-feishu', version: '0.1.0' }, { capabilities: {} })
     let resolveClosed!: () => void
@@ -332,13 +389,35 @@ export function createSupervisor(
     if (!isCurrent(generation)) return
     connectedAt = Date.now()
     await store.recordConnected()
+    scheduleWatchdog()
     if (failedAttempts > 0) ctx.logger.info(`${label}: reconnected and re-synced tools (attempt ${failedAttempts}/${RECONNECT.maxAttempts})`)
+  }
+
+  /** Quit the current generation (if any) and reconnect, e.g. after OAuth token change. */
+  async function restart(): Promise<void> {
+    if (disposed) return
+    failedAttempts = 0
+    const old = client
+    if (old !== null) {
+      // Detach before closing so the old generation's onclose does not
+      // schedule another reconnect (isCurrent(old) is now false).
+      client = null
+      clientClosed = null
+      transport = null
+      try {
+        await old.close()
+      } catch {}
+    }
+    await connectGeneration(false)
   }
 
   return {
     async start(): Promise<void> {
       failedAttempts = 0
       await connectGeneration(true)
+    },
+    restart() {
+      return restart()
     },
     isConnected(): boolean {
       return client !== null
@@ -356,6 +435,10 @@ export function createSupervisor(
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer)
         reconnectTimer = null
+      }
+      if (watchdogTimer !== null) {
+        clearTimeout(watchdogTimer)
+        watchdogTimer = null
       }
       const current = client
       const currentClosed = clientClosed

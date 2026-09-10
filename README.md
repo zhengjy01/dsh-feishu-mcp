@@ -1,4 +1,4 @@
-# dsh-feishu — Feishu (Lark) MCP connection for DeepSeek Harness
+# dsh-feishu-mcp — Feishu (Lark) MCP connection for DeepSeek Harness
 
 Connect DeepSeek Harness (DSH) to [Feishu / Lark](https://open.feishu.cn/) through the **official** [@larksuiteoapi/lark-mcp](https://www.npmjs.com/package/@larksuiteoapi/lark-mcp) server: the plugin spawns the official MCP server as a subprocess with your Feishu app credentials, discovers its tools, and registers them on the agent as `mcp__feishu__*` — so the DSH agent can send IM messages, read/write Bitable (multidimensional tables), manage docs, calendar, drive, and more, using your Feishu app's permissions.
 
@@ -24,7 +24,7 @@ A web settings panel (Settings → 飞书) configures the App ID / App Secret, s
 
 ```sh
 # local development (link)
-dsh plugin --profile web add link:/path/to/dsh-feishu
+dsh plugin --profile web add link:/path/to/dsh-feishu-mcp
 # restart dsh web to activate
 ```
 
